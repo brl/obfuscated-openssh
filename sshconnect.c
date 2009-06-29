@@ -57,6 +57,7 @@
 #include "misc.h"
 #include "dns.h"
 #include "version.h"
+#include "obfuscate.h"
 
 char *client_version_string = NULL;
 char *server_version_string = NULL;
@@ -405,6 +406,11 @@ ssh_connect(const char *host, struct sockaddr_storage * hostaddr,
 	packet_set_connection(sock, sock);
 	packet_set_timeout(options.server_alive_interval,
 	    options.server_alive_count_max);
+	if(options.obfuscate_handshake) {
+		if(options.obfuscate_keyword)
+			obfuscate_set_keyword(options.obfuscate_keyword);
+		packet_enable_obfuscation();
+	}
 
 	return 0;
 }
@@ -460,6 +466,8 @@ ssh_exchange_identification(int timeout_ms)
 			else if (len != 1)
 				fatal("ssh_exchange_identification: "
 				    "read: %.100s", strerror(errno));
+			if(options.obfuscate_handshake)
+				obfuscate_input(&buf[i], 1);
 			if (buf[i] == '\r') {
 				buf[i] = '\n';
 				buf[i + 1] = 0;
@@ -537,9 +545,11 @@ ssh_exchange_identification(int timeout_ms)
 	    compat20 ? PROTOCOL_MAJOR_2 : PROTOCOL_MAJOR_1,
 	    compat20 ? PROTOCOL_MINOR_2 : minor1,
 	    SSH_VERSION, compat20 ? "\r\n" : "\n");
+	client_version_string = xstrdup(buf);
+	if(options.obfuscate_handshake)
+		obfuscate_output(buf, strlen(buf));
 	if (atomicio(vwrite, connection_out, buf, strlen(buf)) != strlen(buf))
 		fatal("write: %.100s", strerror(errno));
-	client_version_string = xstrdup(buf);
 	chop(client_version_string);
 	chop(server_version_string);
 	debug("Local version string %.100s", client_version_string);
@@ -1030,6 +1040,9 @@ ssh_login(Sensitive *sensitive, const char *orighost,
 	for (cp = host; *cp; cp++)
 		if (isupper(*cp))
 			*cp = (char)tolower(*cp);
+
+	if(options.obfuscate_handshake)
+		obfuscate_send_seed(packet_get_connection_out());
 
 	/* Exchange protocol version identification strings with the server. */
 	ssh_exchange_identification(timeout_ms);

@@ -77,6 +77,7 @@
 #include "canohost.h"
 #include "misc.h"
 #include "ssh.h"
+#include "obfuscate.h"
 
 #ifdef PACKET_DEBUG
 #define DBG(x) x
@@ -137,6 +138,8 @@ static int server_side = 0;
 
 /* Set to true if we are authenticated. */
 static int after_authentication = 0;
+
+static int obfuscation = 0;
 
 int keep_alive_timeouts = 0;
 
@@ -517,6 +520,9 @@ packet_set_encryption_key(const u_char *key, u_int keylen,
 	ssh1_keylen = keylen;
 	cipher_init(&send_context, cipher, key, keylen, NULL, 0, CIPHER_ENCRYPT);
 	cipher_init(&receive_context, cipher, key, keylen, NULL, 0, CIPHER_DECRYPT);
+
+	if(obfuscation)
+		packet_disable_obfuscation();
 }
 
 u_int
@@ -649,6 +655,9 @@ packet_send1(void)
 	cp = buffer_append_space(&output, buffer_len(&outgoing_packet));
 	cipher_crypt(&send_context, cp, buffer_ptr(&outgoing_packet),
 	    buffer_len(&outgoing_packet));
+
+	if(obfuscation)
+		obfuscate_output(cp, buffer_len(&outgoing_packet));
 
 #ifdef PACKET_DEBUG
 	fprintf(stderr, "encrypted: ");
@@ -870,6 +879,10 @@ packet_send2_wrapped(void)
 	/* append unencrypted MAC */
 	if (mac && mac->enabled)
 		buffer_append(&output, macbuf, mac->mac_len);
+
+	if(obfuscation)
+		obfuscate_output(cp, buffer_len(&outgoing_packet));
+
 #ifdef PACKET_DEBUG
 	fprintf(stderr, "encrypted: ");
 	buffer_dump(&output);
@@ -1088,6 +1101,9 @@ packet_read_poll1(void)
 
 	/* The entire packet is in buffer. */
 
+	if(obfuscation)
+		obfuscate_input(buffer_ptr(&input), padded_len);
+
 	/* Consume packet length. */
 	buffer_consume(&input, 4);
 
@@ -1183,6 +1199,8 @@ packet_read_poll2(u_int32_t *seqnr_p)
 			return SSH_MSG_NONE;
 		buffer_clear(&incoming_packet);
 		cp = buffer_append_space(&incoming_packet, block_size);
+		if(obfuscation)
+			obfuscate_input(buffer_ptr(&input), block_size);
 		cipher_crypt(&receive_context, cp, buffer_ptr(&input),
 		    block_size);
 		cp = buffer_ptr(&incoming_packet);
@@ -1220,6 +1238,8 @@ packet_read_poll2(u_int32_t *seqnr_p)
 	fprintf(stderr, "read_poll enc/full: ");
 	buffer_dump(&input);
 #endif
+	if(obfuscation)
+		obfuscate_input(buffer_ptr(&input), need);
 	cp = buffer_append_space(&incoming_packet, need);
 	cipher_crypt(&receive_context, cp, buffer_ptr(&input), need);
 	buffer_consume(&input, need);
@@ -1766,3 +1786,19 @@ packet_set_authenticated(void)
 {
 	after_authentication = 1;
 }
+
+void
+packet_enable_obfuscation(void)
+{
+	debug("Obfuscation enabled");
+	obfuscation = 1;
+}
+
+void
+packet_disable_obfuscation(void)
+{
+	if(obfuscation)
+		debug("Obfuscation disabled");
+	obfuscation = 0;
+}
+

@@ -179,12 +179,13 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-"usage: ssh [-1246AaCfgKkMNnqsTtVvXxYy] [-b bind_address] [-c cipher_spec]\n"
+"usage: ssh [-1246AaCfgKkMNnqsTtVvXxYyz] [-b bind_address] [-c cipher_spec]\n"
 "           [-D [bind_address:]port] [-e escape_char] [-F configfile]\n"
 "           [-i identity_file] [-L [bind_address:]port:host:hostport]\n"
 "           [-l login_name] [-m mac_spec] [-O ctl_cmd] [-o option] [-p port]\n"
 "           [-R [bind_address:]port:host:hostport] [-S ctl_path]\n"
-"           [-w local_tun[:remote_tun]] [user@]hostname [command]\n"
+"           [-w local_tun[:remote_tun]] [-Z obfuscate_keyword]\n"
+"           [user@]hostname [command]\n"
 	);
 	exit(255);
 }
@@ -273,7 +274,7 @@ main(int ac, char **av)
 
  again:
 	while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
-	    "ACD:F:I:KL:MNO:PR:S:TVw:XYy")) != -1) {
+	    "ACD:F:I:KL:MNO:PR:S:TVw:XYyzZ:")) != -1) {
 		switch (opt) {
 		case '1':
 			options.protocol = SSH_PROTO_1;
@@ -516,6 +517,13 @@ main(int ac, char **av)
 			break;
 		case 'F':
 			config = optarg;
+			break;
+		case 'z':
+			options.obfuscate_handshake = 1;
+			break;
+		case 'Z':
+			options.obfuscate_handshake = 1;
+			options.obfuscate_keyword = optarg;
 			break;
 		default:
 			usage();
