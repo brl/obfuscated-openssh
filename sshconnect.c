@@ -429,6 +429,7 @@ ssh_exchange_identification(int timeout_ms)
 	int minor1 = PROTOCOL_MINOR_1;
 	u_int i, n;
 	size_t len;
+	u_int sendlen;
 	int fdsetsz, remaining, rc;
 	struct timeval t_start, t_remaining;
 	fd_set *fdset;
@@ -546,9 +547,10 @@ ssh_exchange_identification(int timeout_ms)
 	    compat20 ? PROTOCOL_MINOR_2 : minor1,
 	    SSH_VERSION, compat20 ? "\r\n" : "\n");
 	client_version_string = xstrdup(buf);
+	sendlen = strlen(buf);
 	if(options.obfuscate_handshake)
-		obfuscate_output(buf, strlen(buf));
-	if (atomicio(vwrite, connection_out, buf, strlen(buf)) != strlen(buf))
+		obfuscate_output(buf, sendlen);
+	if (atomicio(vwrite, connection_out, buf, sendlen) != sendlen)
 		fatal("write: %.100s", strerror(errno));
 	chop(client_version_string);
 	chop(server_version_string);
