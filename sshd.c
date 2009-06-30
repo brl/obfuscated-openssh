@@ -1879,9 +1879,13 @@ main(int ac, char **av)
 	/* prepare buffer to collect messages to display to user after login */
 	buffer_init(&loginmsg);
 
-	if (use_privsep)
-		if (privsep_preauth(authctxt) == 1)
+	if (use_privsep) {
+		if (privsep_preauth(authctxt) == 1) {
+			if(use_obfuscation)
+				packet_disable_obfuscation();
 			goto authenticated;
+		}
+	}
 
 	/* perform the key exchange */
 	/* authenticate user and start session */
