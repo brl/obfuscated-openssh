@@ -405,6 +405,7 @@ sshd_exchange_identification(int sock_in, int sock_out)
 	char *s, *newline = "\n";
 	char buf[256];			/* Must not be larger than remote_version. */
 	char remote_version[256];	/* Must be at least as big as buf. */
+	u_int sendlen;
 
 	if ((options.protocol & SSH_PROTO_1) &&
 	    (options.protocol & SSH_PROTO_2)) {
@@ -421,14 +422,14 @@ sshd_exchange_identification(int sock_in, int sock_out)
 	snprintf(buf, sizeof buf, "SSH-%d.%d-%.100s%s", major, minor,
 	    SSH_VERSION, newline);
 	server_version_string = xstrdup(buf);
-
+	sendlen = strlen(server_version_string);
 	if(use_obfuscation)
-		obfuscate_output(server_version_string, strlen(server_version_string));
+		obfuscate_output(server_version_string, sendlen);
 
 	/* Send our protocol version identification. */
 	if (atomicio(vwrite, sock_out, server_version_string,
-	    strlen(server_version_string))
-	    != strlen(server_version_string)) {
+	    sendlen)
+	    != sendlen) {
 		logit("Could not write ident string to %s", get_remote_ipaddr());
 		cleanup_exit(255);
 	}
