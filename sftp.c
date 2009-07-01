@@ -1705,10 +1705,11 @@ main(int argc, char **argv)
 	ll = SYSLOG_LEVEL_INFO;
 	infile = stdin;
 
-	while ((ch = getopt(argc, argv, "1hvCo:s:S:b:B:F:P:R:")) != -1) {
+	while ((ch = getopt(argc, argv, "1hvCo:s:S:b:B:F:P:R:zZ:")) != -1) {
 		switch (ch) {
 		case 'C':
-			addargs(&args, "-C");
+		case 'z':
+			addargs(&args, "-%c", ch);
 			break;
 		case 'v':
 			if (debug_level < 3) {
@@ -1719,6 +1720,7 @@ main(int argc, char **argv)
 			break;
 		case 'F':
 		case 'o':
+		case 'Z':
 			addargs(&args, "-%c%s", ch, optarg);
 			break;
 		case '1':

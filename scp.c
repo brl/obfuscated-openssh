@@ -323,7 +323,7 @@ main(int argc, char **argv)
 	addargs(&args, "-oClearAllForwardings yes");
 
 	fflag = tflag = 0;
-	while ((ch = getopt(argc, argv, "dfl:prtvBCc:i:P:q1246S:o:F:")) != -1)
+	while ((ch = getopt(argc, argv, "dfl:prtvBCc:i:P:q1246S:o:F:zZ:")) != -1)
 		switch (ch) {
 		/* User-visible flags. */
 		case '1':
@@ -331,12 +331,14 @@ main(int argc, char **argv)
 		case '4':
 		case '6':
 		case 'C':
+		case 'z':
 			addargs(&args, "-%c", ch);
 			break;
 		case 'o':
 		case 'c':
 		case 'i':
 		case 'F':
+		case 'Z':
 			addargs(&args, "-%c%s", ch, optarg);
 			break;
 		case 'P':
