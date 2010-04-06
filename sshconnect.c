@@ -161,6 +161,12 @@ ssh_proxy_connect(const char *host, u_short port, const char *proxy_command)
 	packet_set_timeout(options.server_alive_interval,
 	    options.server_alive_count_max);
 
+	if(options.obfuscate_handshake) {
+   		if(options.obfuscate_keyword)
+      			obfuscate_set_keyword(options.obfuscate_keyword);
+		packet_enable_obfuscation();
+	}
+
 	/* Indicate OK return */
 	return 0;
 }
