@@ -3027,7 +3027,7 @@ channel_connect_to(const char *host, u_short port, char *ctype, char *rname)
 				permit_adm = 1;
 	}
 
-	if (!permit || !permit_adm) {
+	if (!permit && !permit_adm) {
 		logit("Received request to connect to host %.100s port %d, "
 		    "but the request was denied.", host, port);
 		return NULL;
