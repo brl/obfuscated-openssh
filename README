@@ -130,7 +130,7 @@ instances are initialized with unique keys.
 
 For traffic from the client to the server the constant is the string "client_to_server"
 
-For traffic from the server to the client the constant is the string "server_to_clint"
+For traffic from the server to the client the constant is the string "server_to_client"
 
 Passworded Key Derivation
 -------------------------
