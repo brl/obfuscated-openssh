@@ -1,0 +1,1211 @@
+diff -Naur pristine-openssh/.gitignore obfuscated-openssh/.gitignore
+--- pristine-openssh/.gitignore	1969-12-31 19:00:00.000000000 -0500
++++ obfuscated-openssh/.gitignore	2013-12-24 01:45:04.000000000 -0500
+@@ -0,0 +1,25 @@
++*.o
++Makefile
++*.out
++buildpkg.sh
++config.h
++config.log
++config.status
++libssh.a
++openbsd-compat/libopenbsd-compat.a
++openssh.xml
++opensshd.init
++scp
++sftp
++sftp-server
++ssh
++ssh-add
++ssh-agent
++ssh-keygen
++ssh-keyscan
++ssh-keysign
++ssh-rand-helper
++ssh_prng_cmds
++sshd
++survey.sh
++
+diff -Naur pristine-openssh/kex.c obfuscated-openssh/kex.c
+--- pristine-openssh/kex.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/kex.c	2013-12-24 01:45:04.000000000 -0500
+@@ -159,6 +159,8 @@
+ 	kex->flags &= ~KEX_INIT_SENT;
+ 	xfree(kex->name);
+ 	kex->name = NULL;
++
++	packet_disable_obfuscation();
+ }
+ 
+ void
+diff -Naur pristine-openssh/Makefile.in obfuscated-openssh/Makefile.in
+--- pristine-openssh/Makefile.in	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/Makefile.in	2013-12-24 01:45:04.000000000 -0500
+@@ -71,7 +71,7 @@
+ 	atomicio.o key.o dispatch.o kex.o mac.o uidswap.o uuencode.o misc.o \
+ 	monitor_fdpass.o rijndael.o ssh-dss.o ssh-rsa.o dh.o kexdh.o \
+ 	kexgex.o kexdhc.o kexgexc.o scard.o msg.o progressmeter.o dns.o \
+-	entropy.o scard-opensc.o gss-genr.o umac.o jpake.o schnorr.o
++	entropy.o scard-opensc.o gss-genr.o umac.o jpake.o schnorr.o obfuscate.o
+ 
+ SSHOBJS= ssh.o readconf.o clientloop.o sshtty.o \
+ 	sshconnect.o sshconnect1.o sshconnect2.o mux.o
+diff -Naur pristine-openssh/obfuscate.c obfuscated-openssh/obfuscate.c
+--- pristine-openssh/obfuscate.c	1969-12-31 19:00:00.000000000 -0500
++++ obfuscated-openssh/obfuscate.c	2013-12-24 01:45:04.000000000 -0500
+@@ -0,0 +1,210 @@
++#include "includes.h"
++#include <openssl/evp.h>
++#include <openssl/rc4.h>
++#include <unistd.h>
++
++#include "atomicio.h"
++#include "xmalloc.h"
++#include "log.h"
++#include "obfuscate.h"
++
++static RC4_KEY rc4_input;
++static RC4_KEY rc4_output;
++
++static const char *obfuscate_keyword = NULL;
++
++#define OBFUSCATE_KEY_LENGTH 	16
++#define OBFUSCATE_SEED_LENGTH	16
++#define OBFUSCATE_HASH_ITERATIONS 6000
++#define OBFUSCATE_MAX_PADDING	8192
++#define OBFUSCATE_MAGIC_VALUE	0x0BF5CA7E
++
++struct seed_msg {
++	u_char seed_buffer[OBFUSCATE_SEED_LENGTH];
++	u_int32_t magic;
++	u_int32_t padding_length;
++	u_char padding[];
++};
++
++static void generate_key_pair(const u_char *, u_char *, u_char *);
++static void generate_key(const u_char *, const u_char *, u_int, u_char *);
++static void set_keys(const u_char *, const u_char *);
++static void initialize(const u_char *, int);
++static void read_forever(int);
++
++
++/*
++ * Server calls this
++ */
++void 
++obfuscate_receive_seed(int sock_in)
++{
++	struct seed_msg seed;
++	
++	u_char padding_drain[OBFUSCATE_MAX_PADDING];
++	u_int len;
++	u_int32_t padding_length;
++
++	len = atomicio(read, sock_in, &seed, sizeof(struct seed_msg));
++
++	debug2("obfuscate_receive_seed: read %d byte seed message from client", len);
++	if(len != sizeof(struct seed_msg))
++		fatal("obfuscate_receive_seed: read failed");
++
++	initialize(seed.seed_buffer, 1);
++	obfuscate_input((u_char *)&seed.magic, 8);
++	
++	if(OBFUSCATE_MAGIC_VALUE != ntohl(seed.magic)) {
++		logit("Magic value check failed (%u) on obfuscated handshake.", ntohl(seed.magic));
++		read_forever(sock_in);
++	}
++	padding_length = ntohl(seed.padding_length);
++	if(padding_length > OBFUSCATE_MAX_PADDING) {
++		logit("Illegal padding length %d for obfuscated handshake", ntohl(seed.padding_length));
++		read_forever(sock_in);
++	}
++	len = atomicio(read, sock_in, padding_drain, padding_length);
++	if(len != padding_length)
++		fatal("obfuscate_receive_seed: read failed");
++	debug2("obfuscate_receive_seed: read %d bytes of padding from client.", len);
++	obfuscate_input(padding_drain, padding_length);
++}
++
++/*
++ * Client calls this
++ */
++void
++obfuscate_send_seed(int sock_out)
++{
++	struct seed_msg *seed; 
++	int i;
++	u_int32_t rnd = 0;
++	u_int message_length;
++	u_int padding_length;
++	
++	padding_length = arc4random() % OBFUSCATE_MAX_PADDING;
++	message_length = padding_length + sizeof(struct seed_msg);
++	seed = xmalloc(message_length);
++
++	for(i = 0; i < OBFUSCATE_SEED_LENGTH; i++) {
++		if(i % 4 == 0)
++			rnd = arc4random();
++		seed->seed_buffer[i] = rnd & 0xff;
++		rnd >>= 8;
++	}
++	seed->magic = htonl(OBFUSCATE_MAGIC_VALUE);
++	seed->padding_length = htonl(padding_length);
++	for(i = 0; i < (int)padding_length; i++) {
++		if(i % 4 == 0)
++			rnd = arc4random();
++		seed->padding[i] = rnd & 0xff;
++	}
++	initialize(seed->seed_buffer, 0);
++	obfuscate_output(((u_char *)seed) + OBFUSCATE_SEED_LENGTH,
++		message_length - OBFUSCATE_SEED_LENGTH);
++	debug2("obfuscate_send_seed: Sending seed message with %d bytes of padding", padding_length);
++	atomicio(vwrite, sock_out, seed, message_length);
++	xfree(seed);
++
++}
++
++void
++obfuscate_set_keyword(const char *keyword)
++{
++	debug2("obfuscate_set_keyword: Setting obfuscation keyword to '%s'", keyword);
++	obfuscate_keyword = keyword;
++}
++
++void
++obfuscate_input(u_char *buffer, u_int buffer_len)
++{
++	RC4(&rc4_input, buffer_len, buffer, buffer);
++}
++
++void
++obfuscate_output(u_char *buffer, u_int buffer_len)
++{
++	RC4(&rc4_output, buffer_len, buffer, buffer);
++}
++
++static void
++initialize(const u_char *seed, int server)
++{
++	u_char client_to_server_key[OBFUSCATE_KEY_LENGTH];
++	u_char server_to_client_key[OBFUSCATE_KEY_LENGTH];
++	
++	generate_key_pair(seed, client_to_server_key, server_to_client_key);
++
++	if(server)
++		set_keys(client_to_server_key, server_to_client_key);
++	else
++		set_keys(server_to_client_key, client_to_server_key);
++}
++
++static void
++generate_key_pair(const u_char *seed, u_char *client_to_server_key, u_char *server_to_client_key)
++{
++	generate_key(seed, "client_to_server", strlen("client_to_server"), client_to_server_key);
++	generate_key(seed, "server_to_client", strlen("server_to_client"), server_to_client_key);
++}
++
++static void
++generate_key(const u_char *seed, const u_char *iv, u_int iv_len, u_char *key_data)
++{
++	EVP_MD_CTX ctx;
++	u_char md_output[EVP_MAX_MD_SIZE];
++	int md_len;
++	int i;
++	u_char *buffer;
++	u_char *p;
++	u_int buffer_length;
++
++	buffer_length = OBFUSCATE_SEED_LENGTH + iv_len;
++	if(obfuscate_keyword)
++		buffer_length += strlen(obfuscate_keyword);
++
++	p = buffer = xmalloc(buffer_length);
++
++	memcpy(p, seed, OBFUSCATE_SEED_LENGTH);
++	p += OBFUSCATE_SEED_LENGTH;
++
++	if(obfuscate_keyword) {
++		memcpy(p, obfuscate_keyword, strlen(obfuscate_keyword));
++		p += strlen(obfuscate_keyword);
++	}
++	memcpy(p, iv, iv_len);
++
++	EVP_DigestInit(&ctx, EVP_sha1());
++	EVP_DigestUpdate(&ctx, buffer, OBFUSCATE_SEED_LENGTH + iv_len);
++	EVP_DigestFinal(&ctx, md_output, &md_len);
++
++	xfree(buffer);
++
++	for(i = 0; i < OBFUSCATE_HASH_ITERATIONS; i++) {
++		EVP_DigestInit(&ctx, EVP_sha1());
++		EVP_DigestUpdate(&ctx, md_output, md_len);
++		EVP_DigestFinal(&ctx, md_output, &md_len);
++	}
++
++	if(md_len < OBFUSCATE_KEY_LENGTH) 
++		fatal("Cannot derive obfuscation keys from hash length of %d", md_len);
++
++	memcpy(key_data, md_output, OBFUSCATE_KEY_LENGTH);
++}
++
++static void
++set_keys(const u_char *input_key, const u_char *output_key)
++{
++	RC4_set_key(&rc4_input, OBFUSCATE_KEY_LENGTH, input_key);
++	RC4_set_key(&rc4_output, OBFUSCATE_KEY_LENGTH, output_key);
++}
++
++static void
++read_forever(int sock_in)
++{
++	u_char discard_buffer[1024];
++
++	while(atomicio(read, sock_in, discard_buffer, sizeof(discard_buffer)) > 0)
++		;
++	cleanup_exit(255);
++}
+diff -Naur pristine-openssh/obfuscate.h obfuscated-openssh/obfuscate.h
+--- pristine-openssh/obfuscate.h	1969-12-31 19:00:00.000000000 -0500
++++ obfuscated-openssh/obfuscate.h	2013-12-24 01:45:04.000000000 -0500
+@@ -0,0 +1,10 @@
++#ifndef _OBFUSCATE_H
++#define _OBFUSCATE_H
++
++void obfuscate_receive_seed(int);
++void obfuscate_send_seed(int);
++void obfuscate_set_keyword(const char *);
++void obfuscate_input(u_char *, u_int);
++void obfuscate_output(u_char *, u_int);
++
++#endif
+diff -Naur pristine-openssh/packet.c obfuscated-openssh/packet.c
+--- pristine-openssh/packet.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/packet.c	2013-12-24 01:45:04.000000000 -0500
+@@ -77,6 +77,7 @@
+ #include "canohost.h"
+ #include "misc.h"
+ #include "ssh.h"
++#include "obfuscate.h"
+ 
+ #ifdef PACKET_DEBUG
+ #define DBG(x) x
+@@ -138,6 +139,8 @@
+ /* Set to true if we are authenticated. */
+ static int after_authentication = 0;
+ 
++static int obfuscation = 0;
++
+ int keep_alive_timeouts = 0;
+ 
+ /* Set to the maximum time that we will wait to send or receive a packet */
+@@ -517,6 +520,9 @@
+ 	ssh1_keylen = keylen;
+ 	cipher_init(&send_context, cipher, key, keylen, NULL, 0, CIPHER_ENCRYPT);
+ 	cipher_init(&receive_context, cipher, key, keylen, NULL, 0, CIPHER_DECRYPT);
++
++	if(obfuscation)
++		packet_disable_obfuscation();
+ }
+ 
+ u_int
+@@ -650,6 +656,9 @@
+ 	cipher_crypt(&send_context, cp, buffer_ptr(&outgoing_packet),
+ 	    buffer_len(&outgoing_packet));
+ 
++	if(obfuscation)
++		obfuscate_output(cp, buffer_len(&outgoing_packet));
++
+ #ifdef PACKET_DEBUG
+ 	fprintf(stderr, "encrypted: ");
+ 	buffer_dump(&output);
+@@ -870,6 +879,10 @@
+ 	/* append unencrypted MAC */
+ 	if (mac && mac->enabled)
+ 		buffer_append(&output, macbuf, mac->mac_len);
++
++	if(obfuscation)
++		obfuscate_output(cp, buffer_len(&outgoing_packet));
++
+ #ifdef PACKET_DEBUG
+ 	fprintf(stderr, "encrypted: ");
+ 	buffer_dump(&output);
+@@ -1088,6 +1101,9 @@
+ 
+ 	/* The entire packet is in buffer. */
+ 
++	if(obfuscation)
++		obfuscate_input(buffer_ptr(&input), padded_len);
++
+ 	/* Consume packet length. */
+ 	buffer_consume(&input, 4);
+ 
+@@ -1183,6 +1199,8 @@
+ 			return SSH_MSG_NONE;
+ 		buffer_clear(&incoming_packet);
+ 		cp = buffer_append_space(&incoming_packet, block_size);
++		if(obfuscation)
++			obfuscate_input(buffer_ptr(&input), block_size);
+ 		cipher_crypt(&receive_context, cp, buffer_ptr(&input),
+ 		    block_size);
+ 		cp = buffer_ptr(&incoming_packet);
+@@ -1220,6 +1238,8 @@
+ 	fprintf(stderr, "read_poll enc/full: ");
+ 	buffer_dump(&input);
+ #endif
++	if(obfuscation)
++		obfuscate_input(buffer_ptr(&input), need);
+ 	cp = buffer_append_space(&incoming_packet, need);
+ 	cipher_crypt(&receive_context, cp, buffer_ptr(&input), need);
+ 	buffer_consume(&input, need);
+@@ -1766,3 +1786,19 @@
+ {
+ 	after_authentication = 1;
+ }
++
++void
++packet_enable_obfuscation(void)
++{
++	debug("Obfuscation enabled");
++	obfuscation = 1;
++}
++
++void
++packet_disable_obfuscation(void)
++{
++	if(obfuscation)
++		debug("Obfuscation disabled");
++	obfuscation = 0;
++}
++
+diff -Naur pristine-openssh/packet.h obfuscated-openssh/packet.h
+--- pristine-openssh/packet.h	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/packet.h	2013-12-24 01:45:04.000000000 -0500
+@@ -35,6 +35,8 @@
+ int      packet_is_interactive(void);
+ void     packet_set_server(void);
+ void     packet_set_authenticated(void);
++void     packet_enable_obfuscation(void);
++void     packet_disable_obfuscation(void);
+ 
+ void     packet_start(u_char);
+ void     packet_put_char(int ch);
+diff -Naur pristine-openssh/readconf.c obfuscated-openssh/readconf.c
+--- pristine-openssh/readconf.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/readconf.c	2013-12-24 01:45:04.000000000 -0500
+@@ -111,7 +111,7 @@
+ typedef enum {
+ 	oBadOption,
+ 	oForwardAgent, oForwardX11, oForwardX11Trusted, oGatewayPorts,
+-	oExitOnForwardFailure,
++	oExitOnForwardFailure, oObfuscateHandshake, oObfuscateKeyword,
+ 	oPasswordAuthentication, oRSAAuthentication,
+ 	oChallengeResponseAuthentication, oXAuthLocation,
+ 	oIdentityFile, oHostName, oPort, oCipher, oRemoteForward, oLocalForward,
+@@ -234,6 +234,8 @@
+ #else
+ 	{ "zeroknowledgepasswordauthentication", oUnsupported },
+ #endif
++	{ "obfuscatehandshake", oObfuscateHandshake },
++	{ "obfuscatekeyword", oObfuscateKeyword },
+ 
+ 	{ NULL, oBadOption }
+ };
+@@ -914,6 +916,15 @@
+ 		intptr = &options->visual_host_key;
+ 		goto parse_flag;
+ 
++	case oObfuscateHandshake:
++		intptr = &options->obfuscate_handshake;
++		goto parse_flag;
++
++	case oObfuscateKeyword:
++		options->obfuscate_handshake = 1;
++		charptr = &options->obfuscate_keyword;
++		goto parse_string;
++
+ 	case oDeprecated:
+ 		debug("%s line %d: Deprecated option \"%s\"",
+ 		    filename, linenum, keyword);
+@@ -1065,6 +1076,8 @@
+ 	options->permit_local_command = -1;
+ 	options->visual_host_key = -1;
+ 	options->zero_knowledge_password_authentication = -1;
++	options->obfuscate_handshake = 0;
++	options->obfuscate_keyword = NULL;
+ }
+ 
+ /*
+diff -Naur pristine-openssh/readconf.h obfuscated-openssh/readconf.h
+--- pristine-openssh/readconf.h	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/readconf.h	2013-12-24 01:45:04.000000000 -0500
+@@ -122,6 +122,8 @@
+ 	char	*local_command;
+ 	int	permit_local_command;
+ 	int	visual_host_key;
++	int obfuscate_handshake;
++	char *obfuscate_keyword;
+ 
+ }       Options;
+ 
+diff -Naur pristine-openssh/README obfuscated-openssh/README
+--- pristine-openssh/README	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/README	2013-12-24 01:45:04.000000000 -0500
+@@ -1,65 +1,144 @@
+-See http://www.openssh.com/txt/release-5.2 for the release notes.
++Handshake Obfuscation
++---------------------
++
++Handshake obfuscation strengthens the initial SSH handshake against systems
++that identify or classify various network protocols by examining data in 
++transit for static signatures.  Such automatic classification of traffic is 
++often used to provide different levels of network service for each protocol
++and sometimes used to implement policies which prohibit certain uses of a
++network.
++
++When an SSH connection is initiated, the client and server exchange several
++packets to configure the cryptographic parameters for the session.  Since
++the encryption algorithms and keys have not yet been determined, this exchange
++of messages is not encrypted and is vulnerable to analysis which can conclusively
++identify the connection as SSH protocol traffic no matter what port the server
++is listening on.  For most users this is of no concern, because merely being
++able to identify a connection as an SSH session does not introduce any security
++vulnerabilities in the protocol itself.
++
++Some users may have special security needs where they would prefer not to 
++disclose that they are using the SSH protocol to somebody who may be monitoring
++the network.  Handshake obfuscation prevents automatic identification of SSH
++protocol traffic by encrypting the entire handshake with a stream cipher, and 
++is designed to make it difficult to implement an automated analysis tool even
++understanding how the obfuscation protocol works. 
++
++The obfuscation encryption key is generated in a way which is deliberately 
++slow to make it difficult to implement on the type of high performance network
++hardware which is usually used for classifying protocol traffic.  Additionally
++an option is provided for the client and server to share a 'keyword' which is
++a simple kind of password that is used only for securing the handshake.  No
++connection can be initiated to a server which has keyword obfuscation enabled 
++without knowing the keyword, and the obfuscation keyword is used to derive the
++keys that encrypt the handshake in order prevent decrypting the handshake 
++traffic without knowing the keyword.
++
++
++
++Configuration
++-------------
++
++Server:
++
++The server configuration for obufscated handshakes adds two new keywords which may
++be used in a sshd_config file to enable obfuscation.
++
++    ObfuscatedPort
++           This option is similar to the Port option and specifies one or more ports
++           on which to listen for obfuscated handshake connections.  Both this option
++           and the Port option may be used in the same configuration file to create a
++           configuration with both regular and obfuscated listening ports.
++
++    ObfuscateKeyword
++           Enables the keyword protected obfuscated handshake which prevents initiating
++           a handshake to the server without knowing the keyword.
++
++Client:
++
++The OpenSSH client can be configured to use the obfuscated handshake protocol by passing
++command line options as well as through configuration file options.
++
++    -z             Initiate an obfuscated handshake to the remote server.
++    -Z keyword     Initiate a keyword protected obfuscated handshake to the remote server.
++
++Two new client configuration file options hve been added.
++
++    ObfuscateHandshake
++           Requests that the client use the obfuscated handshake protocol.  The default is 'no'
++
++    ObfuscateKeyword
++           Enables keyword protected obfuscated handshake.  The server and client must be
++           configured with the same keyword in order to initiate a connection.
++
++Protocol Description
++--------------------
++
++The first step in the obfuscation protocol is that the client connects to a port
++running the protocol and sends a seed message which is used to derive the keys
++for obfuscating the handshake.
++
++#define OBFUSCATE_MAGIC_VALUE        0x0BF5CA7E
++#define OBFUSCATE_SEED_LENGTH        16
++#define OBFUSCATE_MAX_PADDING        8192
++
++
++[     16 byte random seed           ][  magic  ][ plength ][ .. plength bytes of random padding ... ]
++|___________________________________||______________________________________________________________|
++                |                                                   |
++            Plaintext                                Encrypted with key derived from seed 
++
++To create the seed message the client first generates 16 pseudo random bytes from which
++the handshake obfuscation keys will be derived.  The client also runs the key derivation algorithm
++(described below) to initialize the obfuscation cipher.
++
++The 'magic' field and the 'plength' field are 32 bit unsigned values transfered in network byte order (MSB first).
++
++The magic field must contain the constant OBFUSCATE_MAGIC_VALUE and the 'plength' field must
++contain a randomly selected value between 0 and OBFUSCATE_MAX_PADDING.  Then 'plength' bytes of
++pseudo randomly generated data is appended after the length field.
++
++The purpose of the padding is to prevent a trivial traffic analysis attack which allows the protocol
++to be identified my merely observing the size of the first message.
++
++Upon receiving the seed message from the client, the server must extract the seed bytes
++and perform the key derivation algorithm (described below) before decrypting the rest of the
++message.  Then the server must verify that the magic value is correct and also that the padding length
++is below OBFUSCATE_MAX_PADDING.
++
++If these checks fail the server will continue reading and discarding all data until
++the client closes the connection without sending anything in response.
++
++Key Derivation
++--------------
++
++The key derivation produces a pair of keys (one for each direction) by performing an iterated 
++hash function over the random seed value concatenated with a constant value.
++
++A different constant value is used for each direction to guarantee that the two stream ciphers
++instances are initialized with unique keys.
++
++#define OBFUSCATE_HASH_ITERATIONS     6000
++#define OBFUSCATE_KEY_LENGTH          16
++
++    h = SHA1(seed || constant)
++
++    for(i = 0; i < OBFUSCATE_HASH_ITERATIONS; i++)
++        h = SHA1(h);
++
++    key = [first OBFUSCATE_KEY_LENGTH bytes of h]
++
++For traffic from the client to the server the constant is the string "client_to_server"
++
++For traffic from the server to the client the constant is the string "server_to_clint"
++
++Passworded Key Derivation
++-------------------------
++
++A configuration option is provided which allows specification of a password which must be specified by a client in order
++to initiate a handshake with the server.  This feature should not be considered as strong authentication as it is only
++for preventing casual portscanning and fingerprinting of your ssh server.
++
++    h = SHA1(seed || password || constant)
+ 
+-- A Japanese translation of this document and of the OpenSSH FAQ is
+-- available at http://www.unixuser.org/~haruyama/security/openssh/index.html
+-- Thanks to HARUYAMA Seigo <haruyama@unixuser.org>
+-
+-This is the port of OpenBSD's excellent OpenSSH[0] to Linux and other
+-Unices.
+-
+-OpenSSH is based on the last free version of Tatu Ylonen's sample
+-implementation with all patent-encumbered algorithms removed (to
+-external libraries), all known security bugs fixed, new features
+-reintroduced and many other clean-ups.  OpenSSH has been created by
+-Aaron Campbell, Bob Beck, Markus Friedl, Niels Provos, Theo de Raadt,
+-and Dug Song. It has a homepage at http://www.openssh.com/
+-
+-This port consists of the re-introduction of autoconf support, PAM
+-support, EGD[1]/PRNGD[2] support and replacements for OpenBSD library
+-functions that are (regrettably) absent from other unices. This port
+-has been best tested on AIX, Cygwin, HP-UX, Linux, MacOS/X,
+-NetBSD, OpenBSD, OpenServer, Solaris, Unicos, and UnixWare.
+-
+-This version actively tracks changes in the OpenBSD CVS repository.
+-
+-The PAM support is now more functional than the popular packages of
+-commercial ssh-1.2.x. It checks "account" and "session" modules for
+-all logins, not just when using password authentication.
+-
+-OpenSSH depends on Zlib[3], OpenSSL[4] and optionally PAM[5].
+-
+-There is now several mailing lists for this port of OpenSSH. Please
+-refer to http://www.openssh.com/list.html for details on how to join.
+-
+-Please send bug reports and patches to the mailing list
+-openssh-unix-dev@mindrot.org. The list is open to posting by
+-unsubscribed users.Code contribution are welcomed, but please follow the 
+-OpenBSD style guidelines[6].
+-
+-Please refer to the INSTALL document for information on how to install
+-OpenSSH on your system. There are a number of differences between this
+-port of OpenSSH and F-Secure SSH 1.x, please refer to the OpenSSH FAQ[7]
+-for details and general tips.
+-
+-Damien Miller <djm@mindrot.org>
+-
+-Miscellania -
+-
+-This version of OpenSSH is based upon code retrieved from the OpenBSD
+-CVS repository which in turn was based on the last free sample
+-implementation released by Tatu Ylonen.
+-
+-References -
+-
+-[0] http://www.openssh.com/faq.html
+-[1] http://www.lothar.com/tech/crypto/
+-[2] http://www.aet.tu-cottbus.de/personen/jaenicke/postfix_tls/prngd.html
+-[3] http://www.gzip.org/zlib/
+-[4] http://www.openssl.org/
+-[5] http://www.openpam.org
+-    http://www.kernel.org/pub/linux/libs/pam/ 
+-    (PAM also is standard on Solaris and HP-UX 11)
+-[6] http://www.openbsd.org/cgi-bin/man.cgi?query=style&sektion=9
+-[7] http://www.openssh.com/faq.html
+ 
+-$Id: README,v 1.70 2009/02/23 00:11:57 djm Exp $
+diff -Naur pristine-openssh/README.obfuscation obfuscated-openssh/README.obfuscation
+--- pristine-openssh/README.obfuscation	1969-12-31 19:00:00.000000000 -0500
++++ obfuscated-openssh/README.obfuscation	2013-12-24 01:45:04.000000000 -0500
+@@ -0,0 +1,144 @@
++Handshake Obfuscation
++---------------------
++
++Handshake obfuscation strengthens the initial SSH handshake against systems
++that identify or classify various network protocols by examining data in 
++transit for static signatures.  Such automatic classification of traffic is 
++often used to provide different levels of network service for each protocol
++and sometimes used to implement policies which prohibit certain uses of a
++network.
++
++When an SSH connection is initiated, the client and server exchange several
++packets to configure the cryptographic parameters for the session.  Since
++the encryption algorithms and keys have not yet been determined, this exchange
++of messages is not encrypted and is vulnerable to analysis which can conclusively
++identify the connection as SSH protocol traffic no matter what port the server
++is listening on.  For most users this is of no concern, because merely being
++able to identify a connection as an SSH session does not introduce any security
++vulnerabilities in the protocol itself.
++
++Some users may have special security needs where they would prefer not to 
++disclose that they are using the SSH protocol to somebody who may be monitoring
++the network.  Handshake obfuscation prevents automatic identification of SSH
++protocol traffic by encrypting the entire handshake with a stream cipher, and 
++is designed to make it difficult to implement an automated analysis tool even
++understanding how the obfuscation protocol works. 
++
++The obfuscation encryption key is generated in a way which is deliberately 
++slow to make it difficult to implement on the type of high performance network
++hardware which is usually used for classifying protocol traffic.  Additionally
++an option is provided for the client and server to share a 'keyword' which is
++a simple kind of password that is used only for securing the handshake.  No
++connection can be initiated to a server which has keyword obfuscation enabled 
++without knowing the keyword, and the obfuscation keyword is used to derive the
++keys that encrypt the handshake in order prevent decrypting the handshake 
++traffic without knowing the keyword.
++
++
++
++Configuration
++-------------
++
++Server:
++
++The server configuration for obufscated handshakes adds two new keywords which may
++be used in a sshd_config file to enable obfuscation.
++
++    ObfuscatedPort
++           This option is similar to the Port option and specifies one or more ports
++           on which to listen for obfuscated handshake connections.  Both this option
++           and the Port option may be used in the same configuration file to create a
++           configuration with both regular and obfuscated listening ports.
++
++    ObfuscateKeyword
++           Enables the keyword protected obfuscated handshake which prevents initiating
++           a handshake to the server without knowing the keyword.
++
++Client:
++
++The OpenSSH client can be configured to use the obfuscated handshake protocol by passing
++command line options as well as through configuration file options.
++
++    -z             Initiate an obfuscated handshake to the remote server.
++    -Z keyword     Initiate a keyword protected obfuscated handshake to the remote server.
++
++Two new client configuration file options hve been added.
++
++    ObfuscateHandshake
++           Requests that the client use the obfuscated handshake protocol.  The default is 'no'
++
++    ObfuscateKeyword
++           Enables keyword protected obfuscated handshake.  The server and client must be
++           configured with the same keyword in order to initiate a connection.
++
++Protocol Description
++--------------------
++
++The first step in the obfuscation protocol is that the client connects to a port
++running the protocol and sends a seed message which is used to derive the keys
++for obfuscating the handshake.
++
++#define OBFUSCATE_MAGIC_VALUE        0x0BF5CA7E
++#define OBFUSCATE_SEED_LENGTH        16
++#define OBFUSCATE_MAX_PADDING        8192
++
++
++[     16 byte random seed           ][  magic  ][ plength ][ .. plength bytes of random padding ... ]
++|___________________________________||______________________________________________________________|
++                |                                                   |
++            Plaintext                                Encrypted with key derived from seed 
++
++To create the seed message the client first generates 16 pseudo random bytes from which
++the handshake obfuscation keys will be derived.  The client also runs the key derivation algorithm
++(described below) to initialize the obfuscation cipher.
++
++The 'magic' field and the 'plength' field are 32 bit unsigned values transfered in network byte order (MSB first).
++
++The magic field must contain the constant OBFUSCATE_MAGIC_VALUE and the 'plength' field must
++contain a randomly selected value between 0 and OBFUSCATE_MAX_PADDING.  Then 'plength' bytes of
++pseudo randomly generated data is appended after the length field.
++
++The purpose of the padding is to prevent a trivial traffic analysis attack which allows the protocol
++to be identified my merely observing the size of the first message.
++
++Upon receiving the seed message from the client, the server must extract the seed bytes
++and perform the key derivation algorithm (described below) before decrypting the rest of the
++message.  Then the server must verify that the magic value is correct and also that the padding length
++is below OBFUSCATE_MAX_PADDING.
++
++If these checks fail the server will continue reading and discarding all data until
++the client closes the connection without sending anything in response.
++
++Key Derivation
++--------------
++
++The key derivation produces a pair of keys (one for each direction) by performing an iterated 
++hash function over the random seed value concatenated with a constant value.
++
++A different constant value is used for each direction to guarantee that the two stream ciphers
++instances are initialized with unique keys.
++
++#define OBFUSCATE_HASH_ITERATIONS     6000
++#define OBFUSCATE_KEY_LENGTH          16
++
++    h = SHA1(seed || constant)
++
++    for(i = 0; i < OBFUSCATE_HASH_ITERATIONS; i++)
++        h = SHA1(h);
++
++    key = [first OBFUSCATE_KEY_LENGTH bytes of h]
++
++For traffic from the client to the server the constant is the string "client_to_server"
++
++For traffic from the server to the client the constant is the string "server_to_clint"
++
++Passworded Key Derivation
++-------------------------
++
++A configuration option is provided which allows specification of a password which must be specified by a client in order
++to initiate a handshake with the server.  This feature should not be considered as strong authentication as it is only
++for preventing casual portscanning and fingerprinting of your ssh server.
++
++    h = SHA1(seed || password || constant)
++
++
+diff -Naur pristine-openssh/scp.c obfuscated-openssh/scp.c
+--- pristine-openssh/scp.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/scp.c	2013-12-24 01:45:04.000000000 -0500
+@@ -323,7 +323,7 @@
+ 	addargs(&args, "-oClearAllForwardings yes");
+ 
+ 	fflag = tflag = 0;
+-	while ((ch = getopt(argc, argv, "dfl:prtvBCc:i:P:q1246S:o:F:")) != -1)
++	while ((ch = getopt(argc, argv, "dfl:prtvBCc:i:P:q1246S:o:F:zZ:")) != -1)
+ 		switch (ch) {
+ 		/* User-visible flags. */
+ 		case '1':
+@@ -331,12 +331,14 @@
+ 		case '4':
+ 		case '6':
+ 		case 'C':
++		case 'z':
+ 			addargs(&args, "-%c", ch);
+ 			break;
+ 		case 'o':
+ 		case 'c':
+ 		case 'i':
+ 		case 'F':
++		case 'Z':
+ 			addargs(&args, "-%c%s", ch, optarg);
+ 			break;
+ 		case 'P':
+diff -Naur pristine-openssh/servconf.c obfuscated-openssh/servconf.c
+--- pristine-openssh/servconf.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/servconf.c	2013-12-24 01:45:04.000000000 -0500
+@@ -61,6 +61,7 @@
+ 
+ 	/* Standard Options */
+ 	options->num_ports = 0;
++	options->num_obfuscated_ports = 0;
+ 	options->ports_from_cmdline = 0;
+ 	options->listen_addrs = NULL;
+ 	options->address_family = -1;
+@@ -127,6 +128,7 @@
+ 	options->num_permitted_opens = -1;
+ 	options->adm_forced_command = NULL;
+ 	options->chroot_directory = NULL;
++	options->obfuscate_keyword = NULL;
+ 	options->zero_knowledge_password_authentication = -1;
+ }
+ 
+@@ -152,7 +154,7 @@
+ 			    _PATH_HOST_DSA_KEY_FILE;
+ 		}
+ 	}
+-	if (options->num_ports == 0)
++	if (options->num_ports == 0 && options->num_obfuscated_ports == 0)
+ 		options->ports[options->num_ports++] = SSH_DEFAULT_PORT;
+ 	if (options->listen_addrs == NULL)
+ 		add_listen_addr(options, NULL, 0);
+@@ -283,8 +285,8 @@
+ 	/* Portable-specific options */
+ 	sUsePAM,
+ 	/* Standard Options */
+-	sPort, sHostKeyFile, sServerKeyBits, sLoginGraceTime, sKeyRegenerationTime,
+-	sPermitRootLogin, sLogFacility, sLogLevel,
++	sPort, sObfuscatedPort, sObfuscateKeyword, sHostKeyFile, sServerKeyBits,
++	sLoginGraceTime, sKeyRegenerationTime, sPermitRootLogin, sLogFacility, sLogLevel,
+ 	sRhostsRSAAuthentication, sRSAAuthentication,
+ 	sKerberosAuthentication, sKerberosOrLocalPasswd, sKerberosTicketCleanup,
+ 	sKerberosGetAFSToken,
+@@ -328,6 +330,8 @@
+ 	{ "pamauthenticationviakbdint", sDeprecated, SSHCFG_GLOBAL },
+ 	/* Standard Options */
+ 	{ "port", sPort, SSHCFG_GLOBAL },
++	{ "obfuscatedport", sObfuscatedPort, SSHCFG_GLOBAL },
++	{ "obfuscatekeyword", sObfuscateKeyword, SSHCFG_GLOBAL },
+ 	{ "hostkey", sHostKeyFile, SSHCFG_GLOBAL },
+ 	{ "hostdsakey", sHostKeyFile, SSHCFG_GLOBAL },		/* alias */
+ 	{ "pidfile", sPidFile, SSHCFG_GLOBAL },
+@@ -464,13 +468,16 @@
+ {
+ 	u_int i;
+ 
+-	if (options->num_ports == 0)
++	if (options->num_ports == 0 && options->num_obfuscated_ports == 0)
+ 		options->ports[options->num_ports++] = SSH_DEFAULT_PORT;
+ 	if (options->address_family == -1)
+ 		options->address_family = AF_UNSPEC;
+-	if (port == 0)
++	if (port == 0) {
+ 		for (i = 0; i < options->num_ports; i++)
+ 			add_one_listen_addr(options, addr, options->ports[i]);
++		for(i = 0; i < options->num_obfuscated_ports; i++)
++			add_one_listen_addr(options, addr, options->obfuscated_ports[i]);
++	}
+ 	else
+ 		add_one_listen_addr(options, addr, port);
+ }
+@@ -704,6 +711,29 @@
+ 			    filename, linenum);
+ 		break;
+ 
++	case sObfuscatedPort:
++		if(options->ports_from_cmdline)
++			return 0;
++		if(options->listen_addrs != NULL)
++			fatal("%s line %d: ports must be specified before ListenAddress.", filename, linenum);
++		if(options->num_obfuscated_ports >= MAX_PORTS)
++			fatal("%s line %d: too many ports.", filename, linenum);
++		arg = strdelim(&cp);
++		if(!arg || *arg == '\0')
++			fatal("%s line %d: missing port number.", filename, linenum);
++		options->obfuscated_ports[options->num_obfuscated_ports++] = a2port(arg);
++		if(options->obfuscated_ports[options->num_obfuscated_ports - 1] <= 0)
++			fatal("%s line %d: badly formatted port number.", filename, linenum);
++		break;
++	case sObfuscateKeyword:
++		charptr = &options->obfuscate_keyword;
++		arg = strdelim(&cp);
++		if(!arg || *arg == '\0')
++			fatal("%s line %d: missing keyword argument.",
++					filename, linenum);
++		if(*activep && *charptr == NULL)
++			*charptr = xstrdup(arg);
++		break;
+ 	case sServerKeyBits:
+ 		intptr = &options->server_key_bits;
+  parse_int:
+diff -Naur pristine-openssh/servconf.h obfuscated-openssh/servconf.h
+--- pristine-openssh/servconf.h	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/servconf.h	2013-12-24 01:45:04.000000000 -0500
+@@ -151,6 +151,11 @@
+ 	int	num_permitted_opens;
+ 
+ 	char   *chroot_directory;
++
++	int obfuscated_ports[MAX_PORTS];
++	u_int num_obfuscated_ports;
++	char *obfuscate_keyword;
++
+ }       ServerOptions;
+ 
+ void	 initialize_server_options(ServerOptions *);
+diff -Naur pristine-openssh/sftp.c obfuscated-openssh/sftp.c
+--- pristine-openssh/sftp.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/sftp.c	2013-12-24 01:45:04.000000000 -0500
+@@ -1705,10 +1705,11 @@
+ 	ll = SYSLOG_LEVEL_INFO;
+ 	infile = stdin;
+ 
+-	while ((ch = getopt(argc, argv, "1hvCo:s:S:b:B:F:P:R:")) != -1) {
++	while ((ch = getopt(argc, argv, "1hvCo:s:S:b:B:F:P:R:zZ:")) != -1) {
+ 		switch (ch) {
+ 		case 'C':
+-			addargs(&args, "-C");
++		case 'z':
++			addargs(&args, "-%c", ch);
+ 			break;
+ 		case 'v':
+ 			if (debug_level < 3) {
+@@ -1719,6 +1720,7 @@
+ 			break;
+ 		case 'F':
+ 		case 'o':
++		case 'Z':
+ 			addargs(&args, "-%c%s", ch, optarg);
+ 			break;
+ 		case '1':
+diff -Naur pristine-openssh/ssh.c obfuscated-openssh/ssh.c
+--- pristine-openssh/ssh.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/ssh.c	2013-12-24 01:45:04.000000000 -0500
+@@ -179,12 +179,13 @@
+ usage(void)
+ {
+ 	fprintf(stderr,
+-"usage: ssh [-1246AaCfgKkMNnqsTtVvXxYy] [-b bind_address] [-c cipher_spec]\n"
++"usage: ssh [-1246AaCfgKkMNnqsTtVvXxYyz] [-b bind_address] [-c cipher_spec]\n"
+ "           [-D [bind_address:]port] [-e escape_char] [-F configfile]\n"
+ "           [-i identity_file] [-L [bind_address:]port:host:hostport]\n"
+ "           [-l login_name] [-m mac_spec] [-O ctl_cmd] [-o option] [-p port]\n"
+ "           [-R [bind_address:]port:host:hostport] [-S ctl_path]\n"
+-"           [-w local_tun[:remote_tun]] [user@]hostname [command]\n"
++"           [-w local_tun[:remote_tun]] [-Z obfuscate_keyword]\n"
++"           [user@]hostname [command]\n"
+ 	);
+ 	exit(255);
+ }
+@@ -273,7 +274,7 @@
+ 
+  again:
+ 	while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
+-	    "ACD:F:I:KL:MNO:PR:S:TVw:XYy")) != -1) {
++	    "ACD:F:I:KL:MNO:PR:S:TVw:XYyzZ:")) != -1) {
+ 		switch (opt) {
+ 		case '1':
+ 			options.protocol = SSH_PROTO_1;
+@@ -517,6 +518,13 @@
+ 		case 'F':
+ 			config = optarg;
+ 			break;
++		case 'z':
++			options.obfuscate_handshake = 1;
++			break;
++		case 'Z':
++			options.obfuscate_handshake = 1;
++			options.obfuscate_keyword = optarg;
++			break;
+ 		default:
+ 			usage();
+ 		}
+diff -Naur pristine-openssh/sshconnect.c obfuscated-openssh/sshconnect.c
+--- pristine-openssh/sshconnect.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/sshconnect.c	2013-12-24 01:45:04.000000000 -0500
+@@ -57,6 +57,7 @@
+ #include "misc.h"
+ #include "dns.h"
+ #include "version.h"
++#include "obfuscate.h"
+ 
+ char *client_version_string = NULL;
+ char *server_version_string = NULL;
+@@ -160,6 +161,12 @@
+ 	packet_set_timeout(options.server_alive_interval,
+ 	    options.server_alive_count_max);
+ 
++	if(options.obfuscate_handshake) {
++   		if(options.obfuscate_keyword)
++      			obfuscate_set_keyword(options.obfuscate_keyword);
++		packet_enable_obfuscation();
++	}
++
+ 	/* Indicate OK return */
+ 	return 0;
+ }
+@@ -405,6 +412,11 @@
+ 	packet_set_connection(sock, sock);
+ 	packet_set_timeout(options.server_alive_interval,
+ 	    options.server_alive_count_max);
++	if(options.obfuscate_handshake) {
++		if(options.obfuscate_keyword)
++			obfuscate_set_keyword(options.obfuscate_keyword);
++		packet_enable_obfuscation();
++	}
+ 
+ 	return 0;
+ }
+@@ -423,6 +435,7 @@
+ 	int minor1 = PROTOCOL_MINOR_1;
+ 	u_int i, n;
+ 	size_t len;
++	u_int sendlen;
+ 	int fdsetsz, remaining, rc;
+ 	struct timeval t_start, t_remaining;
+ 	fd_set *fdset;
+@@ -460,6 +473,8 @@
+ 			else if (len != 1)
+ 				fatal("ssh_exchange_identification: "
+ 				    "read: %.100s", strerror(errno));
++			if(options.obfuscate_handshake)
++				obfuscate_input(&buf[i], 1);
+ 			if (buf[i] == '\r') {
+ 				buf[i] = '\n';
+ 				buf[i + 1] = 0;
+@@ -537,9 +552,12 @@
+ 	    compat20 ? PROTOCOL_MAJOR_2 : PROTOCOL_MAJOR_1,
+ 	    compat20 ? PROTOCOL_MINOR_2 : minor1,
+ 	    SSH_VERSION, compat20 ? "\r\n" : "\n");
+-	if (atomicio(vwrite, connection_out, buf, strlen(buf)) != strlen(buf))
+-		fatal("write: %.100s", strerror(errno));
+ 	client_version_string = xstrdup(buf);
++	sendlen = strlen(buf);
++	if(options.obfuscate_handshake)
++		obfuscate_output(buf, sendlen);
++	if (atomicio(vwrite, connection_out, buf, sendlen) != sendlen)
++		fatal("write: %.100s", strerror(errno));
+ 	chop(client_version_string);
+ 	chop(server_version_string);
+ 	debug("Local version string %.100s", client_version_string);
+@@ -1031,6 +1049,9 @@
+ 		if (isupper(*cp))
+ 			*cp = (char)tolower(*cp);
+ 
++	if(options.obfuscate_handshake)
++		obfuscate_send_seed(packet_get_connection_out());
++
+ 	/* Exchange protocol version identification strings with the server. */
+ 	ssh_exchange_identification(timeout_ms);
+ 
+diff -Naur pristine-openssh/sshd.c obfuscated-openssh/sshd.c
+--- pristine-openssh/sshd.c	2013-12-24 01:53:13.000000000 -0500
++++ obfuscated-openssh/sshd.c	2013-12-24 01:45:04.000000000 -0500
+@@ -118,6 +118,7 @@
+ #endif
+ #include "monitor_wrap.h"
+ #include "version.h"
++#include "obfuscate.h"
+ 
+ #ifdef LIBWRAP
+ #include <tcpd.h>
+@@ -246,6 +247,9 @@
+ /* message to be displayed after login */
+ Buffer loginmsg;
+ 
++/* Enable handshake obfuscation */
++int use_obfuscation = 0;
++
+ /* Unprivileged user */
+ struct passwd *privsep_pw = NULL;
+ 
+@@ -401,6 +405,7 @@
+ 	char *s, *newline = "\n";
+ 	char buf[256];			/* Must not be larger than remote_version. */
+ 	char remote_version[256];	/* Must be at least as big as buf. */
++	u_int sendlen;
+ 
+ 	if ((options.protocol & SSH_PROTO_1) &&
+ 	    (options.protocol & SSH_PROTO_2)) {
+@@ -417,15 +422,23 @@
+ 	snprintf(buf, sizeof buf, "SSH-%d.%d-%.100s%s", major, minor,
+ 	    SSH_VERSION, newline);
+ 	server_version_string = xstrdup(buf);
++	sendlen = strlen(server_version_string);
++	if(use_obfuscation)
++		obfuscate_output(server_version_string, sendlen);
+ 
+ 	/* Send our protocol version identification. */
+ 	if (atomicio(vwrite, sock_out, server_version_string,
+-	    strlen(server_version_string))
+-	    != strlen(server_version_string)) {
++	    sendlen)
++	    != sendlen) {
+ 		logit("Could not write ident string to %s", get_remote_ipaddr());
+ 		cleanup_exit(255);
+ 	}
+ 
++	if(use_obfuscation) {
++		free(server_version_string);
++		server_version_string = strdup(buf);
++	}
++
+ 	/* Read other sides version identification. */
+ 	memset(buf, 0, sizeof(buf));
+ 	for (i = 0; i < sizeof(buf) - 1; i++) {
+@@ -434,6 +447,9 @@
+ 			    get_remote_ipaddr());
+ 			cleanup_exit(255);
+ 		}
++		if(use_obfuscation)
++			obfuscate_input(&buf[i], 1);
++
+ 		if (buf[i] == '\r') {
+ 			buf[i] = 0;
+ 			/* Kludge for F-Secure Macintosh < 1.0.2 */
+@@ -1245,6 +1261,7 @@
+ 	const char *remote_ip;
+ 	char *test_user = NULL, *test_host = NULL, *test_addr = NULL;
+ 	int remote_port;
++	int local_port;
+ 	char *line, *p, *cp;
+ 	int config_s[2] = { -1 , -1 };
+ 	u_int64_t ibytes, obytes;
+@@ -1770,6 +1787,14 @@
+ 	packet_set_connection(sock_in, sock_out);
+ 	packet_set_server();
+ 
++	local_port = get_local_port();
++	for(i = 0; i < (int)options.num_obfuscated_ports; i++) {
++		if(options.obfuscated_ports[i] == local_port) {
++			use_obfuscation = 1;
++			break;
++		}
++	}
++
+ 	/* Set SO_KEEPALIVE if requested. */
+ 	if (options.tcp_keep_alive && packet_connection_is_on_socket() &&
+ 	    setsockopt(sock_in, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) < 0)
+@@ -1829,6 +1854,13 @@
+ 	if (!debug_flag)
+ 		alarm(options.login_grace_time);
+ 
++	if(use_obfuscation) {
++		if(options.obfuscate_keyword)
++			obfuscate_set_keyword(options.obfuscate_keyword);
++		packet_enable_obfuscation();
++		obfuscate_receive_seed(sock_in);
++	}
++
+ 	sshd_exchange_identification(sock_in, sock_out);
+ 
+ 	/* In inetd mode, generate ephemeral key only for proto 1 connections */
+@@ -1848,9 +1880,13 @@
+ 	/* prepare buffer to collect messages to display to user after login */
+ 	buffer_init(&loginmsg);
+ 
+-	if (use_privsep)
+-		if (privsep_preauth(authctxt) == 1)
++	if (use_privsep) {
++		if (privsep_preauth(authctxt) == 1) {
++			if(use_obfuscation)
++				packet_disable_obfuscation();
+ 			goto authenticated;
++		}
++	}
+ 
+ 	/* perform the key exchange */
+ 	/* authenticate user and start session */
